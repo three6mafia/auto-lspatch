@@ -1,0 +1,225 @@
+name: Download and Patch Modules
+
+on:
+  workflow_call:
+    inputs:
+      enable_televip_module:
+        description: 'Enable TeleVip module'
+        default: true
+        required: true
+        type: boolean
+      enable_speedhook_module:
+        description: 'Enable SpeedHook module'
+        default: true
+        required: true
+        type: boolean
+      enable_killergram_module:
+        description: 'Enable Killergram module'
+        default: false
+        required: true
+        type: boolean
+      enable_userid_module:
+        description: 'Enable UserID Viewer module'
+        default: true
+        required: true
+        type: boolean
+      enable_re_telegram_module:
+        description: 'Enable ReTelegram module'
+        default: false
+        required: true
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      enable_televip_module:
+        description: 'Enable TeleVip module'
+        default: true
+        required: true
+        type: boolean
+      enable_speedhook_module:
+        description: 'Enable SpeedHook module'
+        default: true
+        required: true
+        type: boolean
+      enable_killergram_module:
+        description: 'Enable Killergram module'
+        default: false
+        required: true
+        type: boolean
+      enable_userid_module:
+        description: 'Enable UserID Viewer module'
+        default: true
+        required: true
+        type: boolean
+      enable_re_telegram_module:
+        description: 'Enable ReTelegram module'
+        default: false
+        required: true
+        type: boolean
+
+jobs:
+  Clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Delete all releases
+        run: |
+          gh release list --limit 1000 | awk '{print $1}' | while read tag; do
+            echo "Deleting release: $tag"
+            gh release delete "$tag" -y || true
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete all tags
+        run: |
+          git fetch --tags
+          git ls-remote --tags origin | awk '{print $2}' | sed 's|refs/tags/||' | while read tag; do
+            echo "Deleting tag: $tag"
+            git push origin --delete "$tag" || true
+          done
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 0
+          keep_minimum_runs: 0
+
+  build-clients:
+    runs-on: ubuntu-latest
+    needs: Clean
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Download Modules
+        run: |
+          mkdir -p modules_dir
+          echo "Used modules:" > release_body.txt
+          
+          if [[ "${{ github.event.inputs.enable_televip_module }}" == "true" ]]; then
+            echo "- TeleVip" >> release_body.txt
+            gh release download --repo Xposed-Modules-Repo/com.my.televip --pattern "TeleVip.apk" --dir modules_dir
+          fi
+          
+          if [[ "${{ github.event.inputs.enable_speedhook_module }}" == "true" ]]; then
+            echo "- SpeedHook" >> release_body.txt
+            gh release download --repo araafroyall/Telegram-Speed-Hook --pattern "Telegram.Speed.Hook-*.apk" --dir modules_dir
+          fi
+          
+          if [[ "${{ github.event.inputs.enable_killergram_module }}" == "true" ]]; then
+            echo "- Killergram" >> release_body.txt
+            gh release download --repo JeelsBoobz/Killergram --pattern "Killergram*.apk" --dir modules_dir
+          fi
+          
+          if [[ "${{ github.event.inputs.enable_userid_module }}" == "true" ]]; then
+            echo "- UserID Viewer" >> release_body.txt
+            gh release download --repo Xposed-Modules-Repo/com.alex193a.tguseridviewer --pattern "com.alex193a.tguseridviewer_v*_*.apk" --dir modules_dir
+          fi
+          
+          if [[ "${{ github.event.inputs.enable_re_telegram_module }}" == "true" ]]; then
+            echo "- ReTelegram" >> release_body.txt
+            gh release download --repo hxreborn/Re-Telegram-CherryFork --pattern "app-release.apk" --dir modules_dir
+            mv modules_dir/app-release.apk modules_dir/ReTelegram.apk 2>/dev/null || true
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Signer and NPatch
+        run: |
+          # Скачивание утилиты подписи apk
+          gh release download --repo patrickfav/uber-apk-signer --pattern "uber-apk-signer-*.jar"
+          mv uber-apk-signer-*.jar uber-signer.jar
+
+          # Скачивание актуального NPatch CLI jar
+          NPATCH_JAR_URL=$(curl -s https://github.com/7723mod/NPatch/releases/download/v1.0.9/jar-v1.0.9-833-release.jar | grep "browser_download_url.*jar" | head -n 1 | cut -d '"' -f 4)
+          curl -L -o patcher.jar "$NPATCH_JAR_URL"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Telegram Clients
+        run: |
+          # Скачивание ForkGram
+          gh release download --repo forkgram/TelegramAndroid --pattern "ForkClient*.apk"
+          rm -f *compressed.apk # Удаляем сжатую версию, если скачалась
+
+          # Скачивание TelegramFOSS
+          gh release download --repo Telegram-FOSS-Team/Telegram-FOSS --pattern "TF*.apk"
+
+          # Скачивание Официального Telegram (без ограничений Google Play)
+          wget -O telegram-official.apk --tries=5 --timeout=60 --waitretry=10 https://telegram.org/dl/android/apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Patch and Sign Clients
+        run: |
+          # Формируем строку путей ко всем скачанным модулям для NPatch
+          MODULES_STRING=$(ls modules_dir/*.apk 2>/dev/null | tr '\n' ' ')
+          
+          if [ -z "$MODULES_STRING" ]; then
+            echo "Критическая ошибка: Ни один модуль Xposed не выбран или не скачан!"
+            exit 1
+          fi
+
+          mkdir -p output_apks
+
+          patch_and_sign() {
+            local pattern=$1
+            local base_name=$2
+            
+            # Поиск целевого файла клиента
+            local input_apk=$(ls $pattern 2>/dev/null | head -n 1)
+            if [ -z "$input_apk" ] || [ ! -f "$input_apk" ]; then
+              echo "Файл для патчинга по паттерну $pattern не найден. Пропуск."
+              return
+            fi
+            
+            echo "Патчинг файла: $input_apk с модулями: $MODULES_STRING"
+            
+            # Синтаксис NPatch CLI: java -jar patcher.jar <целевой_apk> --embed <модуль1.apk> <модуль2.apk> ...
+            java -jar patcher.jar "$input_apk" --embed $MODULES_STRING
+            
+            # Поиск получившегося файла. NPatch по умолчанию сохраняет с суффиксом в названии исходного файла
+            local patched_raw=$(ls ${input_apk%.apk}-*.apk 2>/dev/null | head -n 1)
+            
+            if [ -f "$patched_raw" ]; then
+              echo "Подпись файла: $patched_raw"
+              # Подписываем с помощью uber-apk-signer
+              java -jar uber-signer.jar --apks "$patched_raw" --out output_apks
+              
+              # Находим подписанный файл в выходной папке и даем ему красивое имя
+              local signed_file=$(ls output_apks/*-aligned-signed.apk 2>/dev/null | head -n 1)
+              if [ -f "$signed_file" ]; then
+                mv "$signed_file" "output_apks/${base_name}-patched.apk"
+                rm -f "$patched_raw"
+              fi
+            else
+              echo "Ошибка: NPatch не смог сгенерировать модифицированный файл для $input_apk"
+            fi
+          }
+
+          # Запуск процесса для каждого скачанного клиента
+          patch_and_sign "ForkClient*.apk" "ForkGram"
+          patch_and_sign "TF*.apk" "TelegramFOSS"
+          patch_and_sign "telegram-official.apk" "TelegramOfficial"
+
+      - name: Upload Patched APKs to GitHub Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Patched-Telegram-Clients
+          path: output_apks/*.apk
+          retention-days: 7
